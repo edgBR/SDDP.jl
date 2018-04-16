@@ -4,34 +4,28 @@ function tigervalue(t, i)
 
     function initialdynamics(p, noise)
         p1 = (noise[1] == :tiger_left) ? 0.0 : 1.0
-        return dynamics((p1, p[2], p[3]), noise[2])
+        return dynamics((p1, p[2]), noise[2])
     end
 
     function dynamics(p, noise)
-        tiger, belief_left, belief_right = p
-        if !isapprox(belief_left, 1 - belief_right, atol=1e-5)
-            error("Belief not sum: $(belief_left), $(1 - belief_right))")
-        end
-
+        tiger, b = p
         hearing = if noise == :true_positive
-            tiger < 0.5 ? (:left) : (:right)
+            tiger <= 0.5 ? (:left) : (:right)
         else
             tiger > 0.5 ? (:left) : (:right)
         end
-
         # b(s′) = p(o | s′) * p(s′| b) / p(o | b)
-        # s′ = tiger left
-        # b  = belief_left
-        if hearing == :left
-            # o  = hearing  left
-            belief_left = 0.85 * belief_left / (0.85 * belief_left + 0.15 * belief_right)
-        else
-            # o  = hearing  right
-            belief_left = 0.15 * belief_left / (0.15 * belief_left + 0.85 * belief_right)
+        b′ = if hearing == :left  # o  = hearing  left
+            0.85 * b / (0.85 * b + 0.15 * (1-b) )
+        else  # o  = hearing  right
+            0.15 * b / (0.15 * b + 0.85 * (1-b) )
         end
-
-        belief_right = 1 - belief_left
-        return tiger, belief_left, belief_right
+        if hearing == :left
+            @assert b′ >= b - 1e-6
+        else
+            @assert b′ <= b + 1e-6
+        end
+        return (tiger, b′)
     end
 
     TIGERS, TIGERS_prob = [:tiger_left, :tiger_right], [0.5, 0.5]
@@ -46,9 +40,9 @@ function tigervalue(t, i)
     end
     DynamicPriceInterpolation(
              dynamics = (t == 1) ? initialdynamics : dynamics,
-            min_price = (0.0,0.0,0.0),
-            max_price = (1.0,1.0,1.0),
-        initial_price = (0.5, 0.5, 0.5),
+            min_price = (0.0,0.0),
+            max_price = (1.0,1.0),
+        initial_price = (0.5, 0.5),
         noise = NOISES,
         lipschitz_constant = 100.0
     )
@@ -84,29 +78,31 @@ m = SDDPModel(
     function reward(p)
         tiger = p[1] # tiger = 0 => left
         return (
-            10 * (
-                open_left * tiger +
-                open_right * (1-tiger)
-            ) -
-            100 * (
-                open_left * (1-tiger) +
-                open_right * tiger
-            ) -
-            1 * listen
+             10 * ( open_left * tiger + open_right * (1-tiger) ) +
+            -100 * ( open_left * (1-tiger) + open_right * tiger ) +
+              -1 * listen
         )
     end
     @stageobjective(sp, reward)
 
-    setSDDiPsolver!(sp, method=LevelMethod(-50.0, quadsolver=IpoptSolver(print_level=0)))
+    setSDDiPsolver!(sp,
+        method = LevelMethod(
+            -200.0,
+            quadsolver = IpoptSolver(print_level=0)
+        ),
+        # method=SubgradientMethod(-100.0),
+        LPsolver = GLPKSolverLP()
+    )
 end
 
+srand(1234)
 solve(m, max_iterations=20)
 
 s = simulate(m, 100, [:open_left′, :open_right′, :stopgo, :price, :listen])
 plt = SDDP.newplot()
+SDDP.addplot!(plt, 1:100, 1:20, (i,t)->s[i][:stageobjective][t],   cumulative=true)
 SDDP.addplot!(plt, 1:100, 1:20, (i,t)->s[i][:price][t][1],   title="Tiger",        ymin=0.0, ymax=1.0)
 SDDP.addplot!(plt, 1:100, 1:20, (i,t)->s[i][:price][t][2],   title="Belief Left",  ymin=0.0, ymax=1.0)
-SDDP.addplot!(plt, 1:100, 1:20, (i,t)->s[i][:price][t][3],   title="Belief Right", ymin=0.0, ymax=1.0)
 SDDP.addplot!(plt, 1:100, 1:20, (i,t)->s[i][:open_left′][t],  title="Open Left",    ymin=0.0, ymax=1.0)
 SDDP.addplot!(plt, 1:100, 1:20, (i,t)->s[i][:open_right′][t], title="Open Right",   ymin=0.0, ymax=1.0)
 SDDP.addplot!(plt, 1:100, 1:20, (i,t)->s[i][:stopgo][t],     title="Stop-Go",      ymin=0.0, ymax=1.0)
